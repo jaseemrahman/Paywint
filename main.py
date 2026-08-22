@@ -1,8 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, status,Query
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
+from fastapi.security import OAuth2PasswordRequestForm
+
+import auth
 
 import models
 from database import engine, get_db
@@ -32,6 +35,25 @@ class ExpenseResponse(ExpenseBase):
     class Config:
         from_attributes = True  # Allows Pydantic to read SQLAlchemy models directly
 
+
+# --- User / Auth Schemas ---
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    is_active: bool
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
 # --- Helper Function for Date and Category Filtering ---
 def apply_filters(query, model, year: Optional[int], month: Optional[int], day: Optional[int], category: Optional[str] = None):
     if year is not None:
@@ -54,6 +76,40 @@ def create_expense(expense: ExpenseCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_expense)
     return db_expense
+
+
+# Create user (register)
+@app.post("/users/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    hashed = auth.get_password_hash(user.password)
+    db_user = models.User(username=user.username, hashed_password=hashed)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+# Token endpoint (login)
+@app.post("/token", response_model=Token)
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = auth.authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = auth.create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# Get current user
+@app.get("/users/me", response_model=UserResponse)
+def read_users_me(current_user: models.User = Depends(auth.get_current_active_user)):
+    return current_user
 
 @app.get("/expenses", response_model=List[ExpenseResponse])
 def get_all_expenses(db: Session = Depends(get_db)):
